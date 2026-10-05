@@ -1,0 +1,2 @@
+1. In the original notebook the for loop was on purpose not self adjusting the max_iteration?
+2. 
