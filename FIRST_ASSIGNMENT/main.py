@@ -18,17 +18,17 @@ def read_pcd(file_path, filter_zeros=True):
     """Reads ASCII PCD file returning (N, 3) spatial coordinates."""
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
-        
+
     header = {}
     data_started = False
     points_list = []
-    
+
     with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith('#'):
                 continue
-                
+
             if not data_started:
                 tokens = line.split()
                 keyword = tokens[0].upper()
@@ -45,14 +45,14 @@ def read_pcd(file_path, filter_zeros=True):
             else:
                 parts = line.split()
                 points_list.append([float(parts[i]) for i in columns])
-                    
+
     points = np.array(points_list, dtype=np.float64).reshape(-1, 3)
     raw_count = len(points)
-    
+
     if filter_zeros and len(points) > 0:
         valid_mask = np.isfinite(points).all(axis=1) & (points[:, 2] > 0.0) & (np.linalg.norm(points, axis=1) > 1e-3)
         points = points[valid_mask]
-        
+
     return points, header, raw_count
 
 
@@ -149,10 +149,10 @@ def sphere_from_four(sample):
 def visible_sphere_inliers(points, center, radius, tolerance_mm):
     offsets = points - center
     errors = np.abs(np.linalg.norm(offsets, axis=1) - radius)
-    
+
     # A visible surface normal faces the camera at the origin.
     facing_camera = np.sum(offsets * points, axis=1) <= 0
-    
+
     return (errors <= tolerance_mm) & facing_camera
 
 
