@@ -15,6 +15,9 @@ FIRST_ASSIGNMENT/
 ├── request.md             # Assignment specification
 ├── ai_prompts.md          # Record of GenAI assistance
 ├── results/               # Results achieved with the main.py program
+    ├── Frame5922.ply
+    ├── Frame9592.ply
+    └── Frame8078.ply
 ├── Frame4994.pcd
 ├── Frame5551.pcd
 ├── Frame5922.pcd
