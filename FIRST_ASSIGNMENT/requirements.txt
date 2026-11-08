@@ -1,7 +1,2 @@
-# Core required dependencies for 3D Computer Vision Assignment 1
-# Strictly adheres to OpenCV and standard Python mathematical libraries rule
-numpy>=1.24.0
-opencv-python>=4.8.0
-
-# Optional visualization dependency for Jupyter Notebook analysis
-matplotlib>=3.7.0
+numpy
+opencv-python

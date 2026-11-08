@@ -15,7 +15,7 @@ SPHERE_TOLERANCE_MM = 5.0
 
 
 def read_pcd(file_path, filter_zeros=True):
-    """Reads ASCII PCD file returning (N, 3) spatial coordinates."""
+    """Read XYZ columns from an ASCII PCD file."""
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
 
@@ -57,21 +57,25 @@ def read_pcd(file_path, filter_zeros=True):
 
 
 def refit_plane(inliers):
-    """The least-squares plane passes through the mean of its points."""
+    """Fit a plane through the inliers by finding their least-spread direction."""
     center = inliers.mean(axis=0)
     centered = inliers - center
     _, axes = np.linalg.eigh(centered.T @ centered)
-    normal = axes[:, 0]  # Direction in which the inliers vary least.
+    normal = axes[:, 0]  # Normal is the least-spread direction.
+
     return normal, normal @ center
 
 
 def estimate_surface_noise(points):
-    """Estimate the thickness of a typical local surface in this frame."""
+    """Estimate a noise scale from small local patches."""
     rng = np.random.default_rng(RANDOM_SEED)
     sample = points[rng.choice(len(points), min(len(points), 10000), replace=False)]
+
     if len(sample) < 4:
         raise ValueError("At least four valid points are required.")
+
     scales = []
+
     for anchor in sample[rng.choice(len(sample), min(64, len(sample)), replace=False)]:
         distances = np.sum((sample - anchor) ** 2, axis=1)
         k = min(40, len(sample))
@@ -80,12 +84,14 @@ def estimate_surface_noise(points):
         residuals = patch @ normal - offset
         mad = np.median(np.abs(residuals - np.median(residuals)))
         scales.append(1.4826 * mad)
+
     precision = np.finfo(float).eps * max(1.0, np.max(np.abs(sample))) * 32
+
     return max(np.median(scales), precision)
 
 
 def find_plane(cloud, tolerance_mm, trials, rng):
-    """Return the strongest sampled plane (unit normal, offset) and its inlier mask."""
+    """Find the sampled plane with the most inliers."""
     best_plane = None
     best_mask = np.zeros(len(cloud), dtype=bool)
     best_count = 0
@@ -94,12 +100,15 @@ def find_plane(cloud, tolerance_mm, trials, rng):
         a, b, c = cloud[rng.choice(len(cloud), size=3, replace=False)]
         normal = np.cross(b - a, c - a)
         length = np.linalg.norm(normal)
+
         if length < 1e-10:
             continue
+
         normal = normal / length
         offset = normal @ a
         mask = np.abs(cloud @ normal - offset) <= tolerance_mm
         count = np.count_nonzero(mask)
+
         if count > best_count:
             best_plane = (normal, offset)
             best_mask = mask
@@ -111,10 +120,13 @@ def find_plane(cloud, tolerance_mm, trials, rng):
 def segment_planes(points, sphere_mask=None, tolerance_mm=None, max_planes=MAX_PLANES, refine=False):
     if tolerance_mm is None:
         tolerance_mm = PLANE_TOLERANCE_MM
+
     rng = np.random.default_rng(RANDOM_SEED)
     plane_labels = np.zeros(len(points), dtype=int)
+
     if sphere_mask is not None:
-        plane_labels[sphere_mask] = -1  # Reserve sphere points before fitting planes.
+        plane_labels[sphere_mask] = -1  # Exclude sphere points from the plane search.
+
     remaining = np.flatnonzero(plane_labels == 0)
     planes = []
     min_points = max(3, math.ceil(MIN_PLANE_FRACTION * len(points)))
@@ -122,17 +134,22 @@ def segment_planes(points, sphere_mask=None, tolerance_mm=None, max_planes=MAX_P
     while len(remaining) >= min_points and (max_planes is None or len(planes) < max_planes):
         plane, mask = find_plane(points[remaining], tolerance_mm, RANSAC_TRIALS, rng)
         count = np.count_nonzero(mask)
+
         if count < min_points:
             break
+
         if refine:
             cloud = points[remaining]
             normal, offset = refit_plane(cloud[mask])
             refined_mask = np.abs(cloud @ normal - offset) <= tolerance_mm
+
             if np.count_nonzero(refined_mask) >= min_points:
                 plane, mask = (normal, offset), refined_mask
+
         planes.append(plane)
         plane_labels[remaining[mask]] = len(planes)
         remaining = remaining[~mask]
+
     return planes, plane_labels
 
 
@@ -146,11 +163,64 @@ def sphere_from_four(sample):
     return origin + shift, np.linalg.norm(shift)
 
 
+def refine_sphere(inliers, center, radius, iterations=10):
+    """Use Gauss-Newton to reduce radial errors on the sphere inliers."""
+    center = np.asarray(center, dtype=float).copy()
+    radius = float(radius)
+
+    if len(inliers) < 4:
+        return center, radius
+
+    for _ in range(iterations):
+        offsets = inliers - center
+        distances = np.linalg.norm(offsets, axis=1)
+        valid = distances > 1e-12  # The radial direction is undefined at the center.
+        if np.count_nonzero(valid) < 4:
+            break
+
+        residuals = distances[valid] - radius
+        jacobian = np.column_stack((
+            -offsets[valid] / distances[valid, None],
+            -np.ones(np.count_nonzero(valid))
+        ))
+
+        # Solve for changes in the three center coordinates and the radius.
+        step, *_ = np.linalg.lstsq(jacobian, -residuals, rcond=None)
+        new_center = center + step[:3]
+        new_radius = radius + step[3]
+
+        if not np.all(np.isfinite(new_center)) or not np.isfinite(new_radius) or new_radius <= 0:
+            break
+
+        # Shorten the step if it makes the fit worse.
+        old_sse = np.sum(residuals ** 2)
+        fraction = 1.0
+        accepted = False
+
+        for _ in range(10):
+            candidate_center = center + fraction * step[:3]
+            candidate_radius = radius + fraction * step[3]
+
+            if candidate_radius > 0:
+                candidate_residuals = np.linalg.norm(inliers[valid] - candidate_center, axis=1) - candidate_radius
+
+                if np.sum(candidate_residuals ** 2) <= old_sse:
+                    center, radius = candidate_center, candidate_radius
+                    accepted = True
+                    break
+            fraction *= 0.5
+
+        if not accepted or np.linalg.norm(fraction * step) < 1e-5:
+            break
+
+    return center, radius
+
+
 def visible_sphere_inliers(points, center, radius, tolerance_mm):
     offsets = points - center
     errors = np.abs(np.linalg.norm(offsets, axis=1) - radius)
 
-    # A visible surface normal faces the camera at the origin.
+    # Assume the camera is at the coordinate origin.
     facing_camera = np.sum(offsets * points, axis=1) <= 0
 
     return (errors <= tolerance_mm) & facing_camera
@@ -162,30 +232,42 @@ def find_sphere(points, tolerance_mm=SPHERE_TOLERANCE_MM):
     scene_width = np.linalg.norm(np.ptp(sample, axis=0))
     best_count = 0
     best = None
+
     for _ in range(SPHERE_TRIALS):
         anchor = sample[rng.integers(len(sample))]
         nearby = sample[np.linalg.norm(sample - anchor, axis=1) < scene_width / 10]
+
         if len(nearby) < 4:
             continue
         sphere = sphere_from_four(nearby[rng.choice(len(nearby), 4, replace=False)])
+
         if sphere is None:
             continue
         center, radius = sphere
+
         if radius > scene_width / 4:
             continue
         count = np.count_nonzero(visible_sphere_inliers(sample, center, radius, tolerance_mm))
+
         if count > best_count:
             best_count = count
             best = sphere
 
     if best is None:
         raise ValueError("Could not fit a sphere to this frame.")
+
     center, radius = best
-    return center, radius, visible_sphere_inliers(points, center, radius, tolerance_mm)
+
+    # Refit using the full-cloud inliers, then check membership again.
+    initial_mask = visible_sphere_inliers(points, center, radius, tolerance_mm)
+    center, radius = refine_sphere(points[initial_mask], center, radius)
+    final_mask = visible_sphere_inliers(points, center, radius, tolerance_mm)
+
+    return center, radius, final_mask
 
 
 def label_colors(plane_count):
-    # Rows are unassigned, planes 1 through N, then sphere (index -1).
+    # Label 0 is grey; -1 indexes the last palette entry (yellow).
     palette = [[160, 160, 160]]
     for i in range(plane_count):
         hue = (0.6 + i * 0.618) % 1
@@ -202,6 +284,7 @@ def segment_frame(points):
     planes, labels = segment_planes(points, sphere_mask, tolerance_mm=plane_tolerance,
                                    max_planes=None, refine=True)
     colors = label_colors(len(planes))[labels]
+
     return labels, colors, plane_tolerance, sphere_tolerance
 
 
