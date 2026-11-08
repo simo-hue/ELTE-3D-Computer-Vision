@@ -11,3 +11,6 @@
 ---
 
 4. Find weaknesses in my solution, for example how we can remove the manual treshold or parameters to make the algorithm more robust and autonomous while keeping my algorithmic idea and strategy ( I want to enhance it while keeping it consistent as it is right now )
+---
+
+5. Based on our discussions and the notebook I've created I want you to generate a simple and clear README.md where is described the basic structure of the folder and more importantly the description and logic of my notebook with the pros & Cons and limitations that we discussed together in the chat.

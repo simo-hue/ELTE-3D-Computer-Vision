@@ -7,13 +7,14 @@ This project reads a 3D point cloud from an ASCII `.pcd` file, finds one sphere 
 All input files and scripts are kept in the same folder:
 
 ```text
-point-cloud-segmentation/
+FIRST_ASSIGNMENT/
 ├── Assignment.ipynb       # Notebook with experiments and OpenCV visualizations
 ├── main.py                # Standalone command-line segmentation program
 ├── README.md              # Project instructions and notes
 ├── requirements.txt       # NumPy and OpenCV
 ├── request.md             # Assignment specification
 ├── ai_prompts.md          # Record of GenAI assistance
+├── results/               # Results achieved with the main.py program
 ├── Frame4994.pcd
 ├── Frame5551.pcd
 ├── Frame5922.pcd
