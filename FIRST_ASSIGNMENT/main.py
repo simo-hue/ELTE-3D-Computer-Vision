@@ -1,5 +1,4 @@
 import math
-import os
 from colorsys import hsv_to_rgb
 
 import numpy as np
@@ -8,56 +7,67 @@ import numpy as np
 MAX_PLANES = 4
 PLANE_TOLERANCE_MM = 6.0
 MIN_PLANE_FRACTION = 0.03
-RANSAC_TRIALS = 150
+RANSAC_TRIALS = 350
 RANDOM_SEED = 42
 SPHERE_TRIALS = 800
 SPHERE_TOLERANCE_MM = 5.0
 
 
-def read_pcd(file_path, filter_zeros=True):
-    """Read XYZ columns from an ASCII PCD file."""
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"File not found: {file_path}")
+def read_pcd(file_path):
+    """Read the x, y, z coordinates from an ASCII PCD file."""
+    fields = []     # Column names from the FIELDS line, e.g. x y z rgb intensity.
+    counts = []     # Number of values per field from the COUNT line (normally 1 each).
+    columns = None  # Positions of x, y, z in a data row; set when the header ends.
+    rows = []
 
-    header = {}
-    data_started = False
-    points_list = []
+    with open(file_path, "r") as file:
+        for line in file:
+            tokens = line.split()
 
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('#'):
+            # Skip empty lines and comment lines.
+            if not tokens or tokens[0].startswith("#"):
                 continue
 
-            if not data_started:
-                tokens = line.split()
-                keyword = tokens[0].upper()
-                if keyword == 'DATA':
-                    header['DATA'] = tokens[1] if len(tokens) > 1 else 'ascii'
-                    if header['DATA'].lower() != 'ascii':
-                        raise ValueError("Expected an ASCII PCD file.")
-                    fields = header.get('FIELDS', [])
-                    counts = list(map(int, header.get('COUNT', ['1'] * len(fields))))
-                    columns = [sum(counts[:fields.index(axis)]) for axis in ('x', 'y', 'z')]
-                    data_started = True
-                else:
-                    header[keyword] = tokens[1:]
-            else:
-                parts = line.split()
-                points_list.append([float(parts[i]) for i in columns])
+            # Data rows: keep only the x, y, z values and ignore every other field.
+            if columns is not None:
+                rows.append([float(tokens[i]) for i in columns])
+                continue
 
-    points = np.array(points_list, dtype=np.float64).reshape(-1, 3)
-    raw_count = len(points)
+            # Header lines: remember the ones needed to locate x, y and z.
+            keyword = tokens[0].upper()
 
-    if filter_zeros and len(points) > 0:
-        valid_mask = np.isfinite(points).all(axis=1) & (points[:, 2] > 0.0) & (np.linalg.norm(points, axis=1) > 1e-3)
-        points = points[valid_mask]
+            if keyword == "FIELDS":
+                fields = tokens[1:]
 
-    return points, header, raw_count
+            elif keyword == "COUNT":
+                counts = [int(value) for value in tokens[1:]]
+
+            elif keyword == "DATA":
+                # DATA is the last header line; the points start on the next line.
+                if len(tokens) < 2 or tokens[1].lower() != "ascii":
+                    raise ValueError("Only ASCII PCD files are supported.")
+
+                if not all(axis in fields for axis in ("x", "y", "z")):
+                    raise ValueError("The PCD file must contain the fields x, y and z.")
+
+                if not counts:
+                    counts = [1] * len(fields)
+
+                # A field starts after all the values of the fields before it.
+                columns = [sum(counts[:fields.index(axis)]) for axis in ("x", "y", "z")]
+
+    if columns is None:
+        raise ValueError("No DATA line found: this is not a valid PCD file.")
+
+    points = np.array(rows, dtype=np.float64).reshape(-1, 3)
+
+    # Drop invalid measurements: NaN/inf values and points without depth (z <= 0).
+    valid = np.isfinite(points).all(axis=1) & (points[:, 2] > 0)
+
+    return points[valid]
 
 
 def refit_plane(inliers):
-    """Fit a plane through the inliers by finding their least-spread direction."""
     center = inliers.mean(axis=0)
     centered = inliers - center
     _, axes = np.linalg.eigh(centered.T @ centered)
@@ -79,9 +89,12 @@ def estimate_surface_noise(points):
     for anchor in sample[rng.choice(len(sample), min(64, len(sample)), replace=False)]:
         distances = np.sum((sample - anchor) ** 2, axis=1)
         k = min(40, len(sample))
+
         patch = sample[np.argpartition(distances, k - 1)[:k]]
         normal, offset = refit_plane(patch)
         residuals = patch @ normal - offset
+
+        # Calculate the Mean Absolute Deviation
         mad = np.median(np.abs(residuals - np.median(residuals)))
         scales.append(1.4826 * mad)
 
@@ -97,18 +110,28 @@ def find_plane(cloud, tolerance_mm, trials, rng):
     best_count = 0
 
     for _ in range(trials):
-        a, b, c = cloud[rng.choice(len(cloud), size=3, replace=False)]
-        normal = np.cross(b - a, c - a)
-        length = np.linalg.norm(normal)
 
+        # Select the 3 points
+        a, b, c = cloud[rng.choice(len(cloud), size=3, replace=False)]
+
+        # Calculate the normal 
+        normal = np.cross(b - a, c - a)
+        length = np.linalg.norm(normal) #
+
+        # Must be non-collinear ( not too close points )
         if length < 1e-10:
             continue
 
         normal = normal / length
         offset = normal @ a
+
+        # Calculate every point's distance to the plane
         mask = np.abs(cloud @ normal - offset) <= tolerance_mm
+
+        # How many points satify the range?
         count = np.count_nonzero(mask)
 
+        # Save the best found
         if count > best_count:
             best_plane = (normal, offset)
             best_mask = mask
@@ -156,64 +179,31 @@ def segment_planes(points, sphere_mask=None, tolerance_mm=None, max_planes=MAX_P
 def sphere_from_four(sample):
     origin = sample[0]
     delta = sample[1:] - origin
+
     try:
         shift = np.linalg.solve(2 * delta, np.sum(delta ** 2, axis=1))
-    except np.linalg.LinAlgError:
+    except np.linalg.LinAlgError: # If it's not invertible
         return None
+
     return origin + shift, np.linalg.norm(shift)
 
 
-def refine_sphere(inliers, center, radius, iterations=10):
-    """Use Gauss-Newton to reduce radial errors on the sphere inliers."""
-    center = np.asarray(center, dtype=float).copy()
-    radius = float(radius)
-
+def refine_sphere(inliers, center, radius):
     if len(inliers) < 4:
         return center, radius
 
-    for _ in range(iterations):
-        offsets = inliers - center
-        distances = np.linalg.norm(offsets, axis=1)
-        valid = distances > 1e-12  # The radial direction is undefined at the center.
-        if np.count_nonzero(valid) < 4:
-            break
+    # [1, -2x, -2y, -2z] * [x0^2+y0^2+z0^2-R^2, x0, y0, z0] = -(x^2+y^2+z^2)
+    A = np.column_stack((np.ones(len(inliers)), -2 * inliers))
+    b = -np.sum(inliers ** 2, axis=1)
+    solution = np.linalg.pinv(A) @ b
 
-        residuals = distances[valid] - radius
-        jacobian = np.column_stack((
-            -offsets[valid] / distances[valid, None],
-            -np.ones(np.count_nonzero(valid))
-        ))
+    new_center = solution[1:]
+    radius_squared = new_center @ new_center - solution[0]
 
-        # Solve for changes in the three center coordinates and the radius.
-        step, *_ = np.linalg.lstsq(jacobian, -residuals, rcond=None)
-        new_center = center + step[:3]
-        new_radius = radius + step[3]
+    if radius_squared <= 0:
+        return center, radius
 
-        if not np.all(np.isfinite(new_center)) or not np.isfinite(new_radius) or new_radius <= 0:
-            break
-
-        # Shorten the step if it makes the fit worse.
-        old_sse = np.sum(residuals ** 2)
-        fraction = 1.0
-        accepted = False
-
-        for _ in range(10):
-            candidate_center = center + fraction * step[:3]
-            candidate_radius = radius + fraction * step[3]
-
-            if candidate_radius > 0:
-                candidate_residuals = np.linalg.norm(inliers[valid] - candidate_center, axis=1) - candidate_radius
-
-                if np.sum(candidate_residuals ** 2) <= old_sse:
-                    center, radius = candidate_center, candidate_radius
-                    accepted = True
-                    break
-            fraction *= 0.5
-
-        if not accepted or np.linalg.norm(fraction * step) < 1e-5:
-            break
-
-    return center, radius
+    return new_center, np.sqrt(radius_squared)
 
 
 def visible_sphere_inliers(points, center, radius, tolerance_mm):
@@ -234,19 +224,25 @@ def find_sphere(points, tolerance_mm=SPHERE_TOLERANCE_MM):
     best = None
 
     for _ in range(SPHERE_TRIALS):
+        # I choose an anchor
         anchor = sample[rng.integers(len(sample))]
+        # I look for 4 points near that anchor, but not too far away
         nearby = sample[np.linalg.norm(sample - anchor, axis=1) < scene_width / 10]
 
         if len(nearby) < 4:
             continue
+
         sphere = sphere_from_four(nearby[rng.choice(len(nearby), 4, replace=False)])
 
         if sphere is None:
             continue
+
         center, radius = sphere
 
+        # Reject excessively large spheres
         if radius > scene_width / 4:
             continue
+
         count = np.count_nonzero(visible_sphere_inliers(sample, center, radius, tolerance_mm))
 
         if count > best_count:
@@ -258,7 +254,7 @@ def find_sphere(points, tolerance_mm=SPHERE_TOLERANCE_MM):
 
     center, radius = best
 
-    # Refit using the full-cloud inliers, then check membership again.
+    # Refit using the full-cloud inliers.
     initial_mask = visible_sphere_inliers(points, center, radius, tolerance_mm)
     center, radius = refine_sphere(points[initial_mask], center, radius)
     final_mask = visible_sphere_inliers(points, center, radius, tolerance_mm)
@@ -278,7 +274,7 @@ def label_colors(plane_count):
 
 def segment_frame(points):
     noise = estimate_surface_noise(points)
-    plane_tolerance = 4 * noise
+    plane_tolerance = 10 * noise
     sphere_tolerance = 3.5 * noise
     _, _, sphere_mask = find_sphere(points, tolerance_mm=sphere_tolerance)
     planes, labels = segment_planes(points, sphere_mask, tolerance_mm=plane_tolerance,
@@ -303,7 +299,7 @@ def main():
     parser.add_argument("input_pcd")
     parser.add_argument("output_ply")
     args = parser.parse_args()
-    points, _, _ = read_pcd(args.input_pcd)
+    points = read_pcd(args.input_pcd)
     _, colors, plane_tol, sphere_tol = segment_frame(points)
     write_ply(args.output_ply, points, colors)
     print(f"Saved {len(points):,} points. Plane tolerance {plane_tol:.2f} mm, "
