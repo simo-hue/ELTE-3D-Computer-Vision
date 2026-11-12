@@ -24,16 +24,16 @@ def read_pcd(file_path):
         for line in file:
             tokens = line.split()
 
-            # Skip empty lines and comment lines.
+            # Skip empty / comment lines.
             if not tokens or tokens[0].startswith("#"):
                 continue
 
-            # Data rows: keep only the x, y, z values and ignore every other field.
+            # Data rows: keep only the x, y, z
             if columns is not None:
                 rows.append([float(tokens[i]) for i in columns])
                 continue
 
-            # Header lines: remember the ones needed to locate x, y and z.
+            # Header lines
             keyword = tokens[0].upper()
 
             if keyword == "FIELDS":
@@ -43,17 +43,19 @@ def read_pcd(file_path):
                 counts = [int(value) for value in tokens[1:]]
 
             elif keyword == "DATA":
-                # DATA is the last header line; the points start on the next line.
+                # DATA is the last header line
                 if len(tokens) < 2 or tokens[1].lower() != "ascii":
                     raise ValueError("Only ASCII PCD files are supported.")
 
+                # Check the coordinates that I need
                 if not all(axis in fields for axis in ("x", "y", "z")):
                     raise ValueError("The PCD file must contain the fields x, y and z.")
 
+                # If COUNT is absent
                 if not counts:
                     counts = [1] * len(fields)
 
-                # A field starts after all the values of the fields before it.
+                # Finding x, y, z indexes -> [0, 1, 2]
                 columns = [sum(counts[:fields.index(axis)]) for axis in ("x", "y", "z")]
 
     if columns is None:
@@ -68,10 +70,17 @@ def read_pcd(file_path):
 
 
 def refit_plane(inliers):
-    center = inliers.mean(axis=0)
-    centered = inliers - center
+    # Centroid
+    center = inliers.mean(axis=0) 
+
+    # P - Centroid
+    centered = inliers - center 
+
+    # covariance matrix -> principal directions the point cloud varies
     _, axes = np.linalg.eigh(centered.T @ centered)
-    normal = axes[:, 0]  # Normal is the least-spread direction.
+
+    # least variation
+    normal = axes[:, 0]  # min eig. Value
 
     return normal, normal @ center
 
@@ -125,7 +134,7 @@ def find_plane(cloud, tolerance_mm, trials, rng):
         normal = normal / length
         offset = normal @ a
 
-        # Calculate every point's distance to the plane
+        # Calculate every point's perpendicular distance to the plane
         mask = np.abs(cloud @ normal - offset) <= tolerance_mm
 
         # How many points satify the range?
@@ -141,46 +150,65 @@ def find_plane(cloud, tolerance_mm, trials, rng):
 
 
 def segment_planes(points, sphere_mask=None, tolerance_mm=None, max_planes=MAX_PLANES, refine=False):
+    """Detectc and labels the planes that RANSAC is able to find"""
+
     if tolerance_mm is None:
         tolerance_mm = PLANE_TOLERANCE_MM
 
     rng = np.random.default_rng(RANDOM_SEED)
-    plane_labels = np.zeros(len(points), dtype=int)
+
+    plane_labels = np.zeros(len(points), dtype=int) # No planes yet
 
     if sphere_mask is not None:
         plane_labels[sphere_mask] = -1  # Exclude sphere points from the plane search.
 
+    # still available for plane detection
     remaining = np.flatnonzero(plane_labels == 0)
+
     planes = []
     min_points = max(3, math.ceil(MIN_PLANE_FRACTION * len(points)))
 
+    # Enough points remain
     while len(remaining) >= min_points and (max_planes is None or len(planes) < max_planes):
+        # Use RANSAC for finding a plane
         plane, mask = find_plane(points[remaining], tolerance_mm, RANSAC_TRIALS, rng)
+
+        # Count the inliers of that plane
         count = np.count_nonzero(mask)
 
         if count < min_points:
             break
 
         if refine:
+            # Use the inliers
             cloud = points[remaining]
+
             normal, offset = refit_plane(cloud[mask])
             refined_mask = np.abs(cloud @ normal - offset) <= tolerance_mm
 
             if np.count_nonzero(refined_mask) >= min_points:
                 plane, mask = (normal, offset), refined_mask
 
+        # Add the found plane
         planes.append(plane)
+
+        # Assign the label
         plane_labels[remaining[mask]] = len(planes)
+
+        # Remove the inliers for future estimations
         remaining = remaining[~mask]
 
     return planes, plane_labels
 
 
 def sphere_from_four(sample):
+    """Calculate the center and radius"""
+
     origin = sample[0]
     delta = sample[1:] - origin
 
     try:
+        # 2 * [ x2-x1  y2-y1  z2-z1 ] | [ ( x2^2+y2^2+z2^2 ) - ( x2^2+y2^2+z2^2 )]
         shift = np.linalg.solve(2 * delta, np.sum(delta ** 2, axis=1))
     except np.linalg.LinAlgError: # If it's not invertible
         return None
@@ -195,6 +223,8 @@ def refine_sphere(inliers, center, radius):
     # [1, -2x, -2y, -2z] * [x0^2+y0^2+z0^2-R^2, x0, y0, z0] = -(x^2+y^2+z^2)
     A = np.column_stack((np.ones(len(inliers)), -2 * inliers))
     b = -np.sum(inliers ** 2, axis=1)
+
+    # [k, x0, y0, z0]
     solution = np.linalg.pinv(A) @ b
 
     new_center = solution[1:]
@@ -208,6 +238,8 @@ def refine_sphere(inliers, center, radius):
 
 def visible_sphere_inliers(points, center, radius, tolerance_mm):
     offsets = points - center
+
+    # radial error
     errors = np.abs(np.linalg.norm(offsets, axis=1) - radius)
 
     # Assume the camera is at the coordinate origin.
@@ -226,6 +258,7 @@ def find_sphere(points, tolerance_mm=SPHERE_TOLERANCE_MM):
     for _ in range(SPHERE_TRIALS):
         # I choose an anchor
         anchor = sample[rng.integers(len(sample))]
+
         # I look for 4 points near that anchor, but not too far away
         nearby = sample[np.linalg.norm(sample - anchor, axis=1) < scene_width / 10]
 
