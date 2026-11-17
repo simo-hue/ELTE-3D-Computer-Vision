@@ -81,10 +81,10 @@ def read_pcd(file_path):
 
 
 def refit_plane(inliers):
-    # Centroid
+    # Centroid -> Best plane MUST pass from here
     center = inliers.mean(axis=0) 
 
-    # P - Centroid -> Relative coordinates
+    # Move the origin -> Relative coordinates
     centered = inliers - center 
 
     # covariance matrix -> principal directions the point cloud varies
@@ -219,7 +219,6 @@ def sphere_from_four(sample):
     delta = sample[1:] - origin
 
     try:
-        # 2 * [ x2-x1  y2-y1  z2-z1 ] | [ ( x2^2+y2^2+z2^2 ) - ( x2^2+y2^2+z2^2 )]
         shift = np.linalg.solve(2 * delta, np.sum(delta ** 2, axis=1))
     except np.linalg.LinAlgError: # If it's not invertible
         return None
@@ -235,12 +234,15 @@ def refine_sphere(inliers, center, radius):
     A = np.column_stack((np.ones(len(inliers)), -2 * inliers))
     b = -np.sum(inliers ** 2, axis=1)
 
+    print("shape of A ",A.shape)
+
     # [k, x0, y0, z0]
     solution = np.linalg.pinv(A) @ b
 
     # [x0, y0, z0]
     new_center = solution[1:]
 
+    # Radius from K
     radius_squared = new_center @ new_center - solution[0]
 
     if radius_squared <= 0:
