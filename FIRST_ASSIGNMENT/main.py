@@ -20,60 +20,71 @@ def read_pcd(file_path):
     columns = None  # Positions of x, y, z in a data row; set when the header ends.
     rows = []
 
-    with open(file_path, "r") as file:
-        for line in file:
-            tokens = line.split()
+    try:
+        with open(file_path, "r") as file:
+            for line in file:
+                tokens = line.split()
 
-            # Skip empty / comment lines.
-            if not tokens or tokens[0].startswith("#"):
-                continue
+                # Skip empty / comment lines.
+                if not tokens or tokens[0].startswith("#"):
+                    continue
 
-            # Data rows: keep only the x, y, z
-            if columns is not None:
-                rows.append([float(tokens[i]) for i in columns])
-                continue
+                # Data rows: keep only the x, y, z
+                if columns is not None:
+                    rows.append([float(tokens[i]) for i in columns])
+                    continue
 
-            # Header lines
-            keyword = tokens[0].upper()
+                # Header lines
+                keyword = tokens[0].upper()
 
-            if keyword == "FIELDS":
-                fields = tokens[1:]
+                # Extract only one actual values
+                if keyword == "FIELDS":
+                    fields = tokens[1:]
 
-            elif keyword == "COUNT":
-                counts = [int(value) for value in tokens[1:]]
+                # Extract only one actual values
+                elif keyword == "COUNT":
+                    counts = [int(value) for value in tokens[1:]]
 
-            elif keyword == "DATA":
-                # DATA is the last header line
-                if len(tokens) < 2 or tokens[1].lower() != "ascii":
-                    raise ValueError("Only ASCII PCD files are supported.")
+                elif keyword == "DATA":
+                    # DATA is the last header line
+                    if len(tokens) < 2 or tokens[1].lower() != "ascii":
+                        raise ValueError("Only ASCII PCD files are supported.")
 
-                # Check the coordinates that I need
-                if not all(axis in fields for axis in ("x", "y", "z")):
-                    raise ValueError("The PCD file must contain the fields x, y and z.")
+                    # Check the coordinates that I need
+                    if not all(axis in fields for axis in ("x", "y", "z")):
+                        raise ValueError("The PCD file must contain the fields x, y and z.")
 
-                # If COUNT is absent
-                if not counts:
-                    counts = [1] * len(fields)
+                    # If COUNT is absent
+                    if not counts:
+                        counts = [1] * len(fields) # I assume every field has 1 value
 
-                # Finding x, y, z indexes -> [0, 1, 2]
-                columns = [sum(counts[:fields.index(axis)]) for axis in ("x", "y", "z")]
+                    # Finding x, y, z indexes -> [0, 1, 2]
+                    columns = [sum(counts[:fields.index(axis)]) for axis in ("x", "y", "z")]
 
-    if columns is None:
-        raise ValueError("No DATA line found: this is not a valid PCD file.")
+        if columns is None:
+            raise ValueError("No DATA line found: this is not a valid PCD file.")
 
-    points = np.array(rows, dtype=np.float64).reshape(-1, 3)
+        points = np.array(rows, dtype=np.float64).reshape(-1, 3)
 
-    # Drop invalid measurements: NaN/inf values and points without depth (z <= 0).
-    valid = np.isfinite(points).all(axis=1) & (points[:, 2] > 0)
+        # Drop invalid measurements: NaN/inf values and points without depth (z <= 0).
+        valid = np.isfinite(points).all(axis=1) & (points[:, 2] > 0)
 
-    return points[valid]
+        return points[valid]
+
+    except FileNotFoundError:
+        print(f"File not found: {file_path}")
+        exit(1)
+
+    except ValueError as e:
+        print(f"Invalid PCD file: {e}")
+        exit(1)
 
 
 def refit_plane(inliers):
-    # Centroid
+    # Centroid -> Best plane MUST pass from here
     center = inliers.mean(axis=0) 
 
-    # P - Centroid
+    # Move the origin -> Relative coordinates
     centered = inliers - center 
 
     # covariance matrix -> principal directions the point cloud varies
@@ -125,7 +136,7 @@ def find_plane(cloud, tolerance_mm, trials, rng):
 
         # Calculate the normal 
         normal = np.cross(b - a, c - a)
-        length = np.linalg.norm(normal) #
+        length = np.linalg.norm(normal)
 
         # Must be non-collinear ( not too close points )
         if length < 1e-10:
@@ -208,7 +219,6 @@ def sphere_from_four(sample):
     delta = sample[1:] - origin
 
     try:
-        # 2 * [ x2-x1  y2-y1  z2-z1 ] | [ ( x2^2+y2^2+z2^2 ) - ( x2^2+y2^2+z2^2 )]
         shift = np.linalg.solve(2 * delta, np.sum(delta ** 2, axis=1))
     except np.linalg.LinAlgError: # If it's not invertible
         return None
@@ -224,10 +234,15 @@ def refine_sphere(inliers, center, radius):
     A = np.column_stack((np.ones(len(inliers)), -2 * inliers))
     b = -np.sum(inliers ** 2, axis=1)
 
+    print("shape of A ",A.shape)
+
     # [k, x0, y0, z0]
     solution = np.linalg.pinv(A) @ b
 
+    # [x0, y0, z0]
     new_center = solution[1:]
+
+    # Radius from K
     radius_squared = new_center @ new_center - solution[0]
 
     if radius_squared <= 0:
@@ -250,8 +265,12 @@ def visible_sphere_inliers(points, center, radius, tolerance_mm):
 
 def find_sphere(points, tolerance_mm=SPHERE_TOLERANCE_MM):
     rng = np.random.default_rng(RANDOM_SEED)
+
     sample = points[rng.choice(len(points), min(6000, len(points)), replace=False)]
+
+    # range of the coordinates along each axis -> Diagonal Length
     scene_width = np.linalg.norm(np.ptp(sample, axis=0))
+
     best_count = 0
     best = None
 
@@ -309,9 +328,12 @@ def segment_frame(points):
     noise = estimate_surface_noise(points)
     plane_tolerance = 10 * noise
     sphere_tolerance = 3.5 * noise
+
     _, _, sphere_mask = find_sphere(points, tolerance_mm=sphere_tolerance)
+
     planes, labels = segment_planes(points, sphere_mask, tolerance_mm=plane_tolerance,
                                    max_planes=None, refine=True)
+
     colors = label_colors(len(planes))[labels]
 
     return labels, colors, plane_tolerance, sphere_tolerance
